@@ -1,0 +1,123 @@
+name: Daily tvm-spec cp0 sync
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Branch in ton-community/tvm-spec to fetch cp0.json from'
+        required: false
+        default: 'master'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-release:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_branch || 'master' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Python dependencies
+        run: pip install markdown
+
+      - name: Fetch and transform cp0.json
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.request
+          import markdown
+
+          branch = os.environ.get('SOURCE_BRANCH', 'master')
+          url = f"https://raw.githubusercontent.com/ton-community/tvm-spec/{branch}/cp0.json"
+
+          with urllib.request.urlopen(url) as resp:
+              data = json.load(resp)
+
+          # Convert doc.description from Markdown to HTML if present
+          doc = data.get('doc')
+          if isinstance(doc, dict) and isinstance(doc.get('description'), str):
+              doc['description'] = markdown.markdown(doc['description'], extensions=['extra', 'sane_lists'])
+
+          # Find latest commit touching cp0.json on the given branch
+          token = os.environ.get('GITHUB_TOKEN')
+          commits_api = f"https://api.github.com/repos/ton-community/tvm-spec/commits?path=cp0.json&sha={branch}&per_page=1"
+          req = urllib.request.Request(commits_api, headers={
+              'Accept': 'application/vnd.github+json',
+              'User-Agent': 'cp0-sync-action'
+          })
+          if token:
+              req.add_header('Authorization', f'Bearer {token}')
+          with urllib.request.urlopen(req) as r:
+              commits = json.load(r)
+          source_sha = commits[0]['sha'] if commits else 'unknown'
+          source_sha_short = source_sha[:7]
+
+          os.makedirs('build', exist_ok=True)
+          out_path = os.path.join('build', 'cp0.json')
+          with open(out_path, 'w', encoding='utf-8') as f:
+              json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+          # Write outputs
+          gh_out = os.environ.get('GITHUB_OUTPUT')
+          with open(gh_out, 'a', encoding='utf-8') as outf:
+              outf.write(f"artifact={out_path}\n")
+              outf.write(f"source_sha={source_sha}\n")
+              outf.write(f"source_sha_short={source_sha_short}\n")
+          PY
+
+      - name: Compute tag
+        id: ts
+        run: echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Check if release for this commit exists
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="cp0-${{ steps.build.outputs.source_sha_short }}"
+          REPO="$GITHUB_REPOSITORY"
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}")
+          if [ "$code" = "200" ]; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or update GitHub release
+        if: steps.check.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cp0-${{ steps.build.outputs.source_sha_short }}
+          name: cp0.json from ${{ env.SOURCE_BRANCH }} on ${{ steps.ts.outputs.date }} (commit ${{ steps.build.outputs.source_sha_short }})
+          body: |
+            Automated export of cp0.json from `ton-community/tvm-spec` branch `${{ env.SOURCE_BRANCH }}`.
+            Field `doc.description` rendered from Markdown to HTML. JSON is compact.
+            Source commit: `${{ steps.build.outputs.source_sha }}`
+          files: ${{ steps.build.outputs.artifact }}
+          draft: false
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip release (already exists)
+        if: steps.check.outputs.should_release != 'true'
+        run: echo "Release for commit ${{ steps.build.outputs.source_sha_short }} already exists. Skipping."
+
+
