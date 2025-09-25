@@ -66,8 +66,7 @@ jobs:
           source_sha = commits[0]['sha'] if commits else 'unknown'
           source_sha_short = source_sha[:7]
 
-          os.makedirs('build', exist_ok=True)
-          out_path = os.path.join('build', 'cp0.json')
+          out_path = 'cp0.json'
           with open(out_path, 'w', encoding='utf-8') as f:
               json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
           # Write outputs
@@ -78,46 +77,18 @@ jobs:
               outf.write(f"source_sha_short={source_sha_short}\n")
           PY
 
-      - name: Compute tag
-        id: ts
-        run: echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
-
-      - name: Check if release for this commit exists
-        id: check
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit changes if any
         run: |
           set -euo pipefail
-          TAG="cp0-${{ steps.build.outputs.source_sha_short }}"
-          REPO="$GITHUB_REPOSITORY"
-          code=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}")
-          if [ "$code" = "200" ]; then
-            echo "should_release=false" >> $GITHUB_OUTPUT
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -N cp0.json
+          if git diff --quiet -- cp0.json; then
+            echo "No changes in cp0.json. Skipping commit."
           else
-            echo "should_release=true" >> $GITHUB_OUTPUT
+            git add cp0.json
+            git commit -m "chore: update cp0.json from ton-community/tvm-spec@${{ steps.build.outputs.source_sha_short }} (branch ${{ env.SOURCE_BRANCH }})"
+            git push
           fi
-
-      - name: Create or update GitHub release
-        if: steps.check.outputs.should_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: cp0-${{ steps.build.outputs.source_sha_short }}
-          name: cp0.json from ${{ env.SOURCE_BRANCH }} on ${{ steps.ts.outputs.date }} (commit ${{ steps.build.outputs.source_sha_short }})
-          body: |
-            Automated export of cp0.json from `ton-community/tvm-spec` branch `${{ env.SOURCE_BRANCH }}`.
-            Field `doc.description` rendered from Markdown to HTML. JSON is compact.
-            Source commit: `${{ steps.build.outputs.source_sha }}`
-          files: ${{ steps.build.outputs.artifact }}
-          draft: false
-          make_latest: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Skip release (already exists)
-        if: steps.check.outputs.should_release != 'true'
-        run: echo "Release for commit ${{ steps.build.outputs.source_sha_short }} already exists. Skipping."
 
 
