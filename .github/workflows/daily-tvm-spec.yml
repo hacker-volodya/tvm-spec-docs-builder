@@ -48,9 +48,11 @@ jobs:
               data = json.load(resp)
 
           # Convert doc.description from Markdown to HTML if present
-          doc = data.get('doc')
-          if isinstance(doc, dict) and isinstance(doc.get('description'), str):
+          for insn in data['instructions']:
+              doc = insn['doc']
               doc['description'] = markdown.markdown(doc['description'], extensions=['extra', 'sane_lists'])
+          for alias in data['aliases']:
+              alias['description'] = markdown.markdown(alias['description'], extensions=['extra', 'sane_lists'])
 
           # Find latest commit touching cp0.json on the given branch
           token = os.environ.get('GITHUB_TOKEN')
